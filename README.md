@@ -7,6 +7,10 @@ throws away the engagement bait, merges the same story told five times into one
 entry, and hands back a short brief. It keeps a profile of what you actually
 react to, so the filtering sharpens over time instead of staying generic.
 
+The reading is done by **DeepSeek V4 Flash on [NVIDIA NIM](https://build.nvidia.com/deepseek-ai/deepseek-v4-flash)**,
+which is free. Claude is supported as an alternative backend — one line of
+config.
+
 ```
 Your brief — Thu 06 Aug, 09:12 (last 24h)
 
@@ -24,7 +28,7 @@ Also, briefly
   · Rust 1.90 stabilises async closures and 12 const fns.
     lobsters  [f169ef61fae5b6f2]
 
-52 fetched · 31 new · 14 filtered out · 3 muted · 6 tool calls · 41,208 tokens (33,900 cached)
+52 fetched · 31 new · 14 filtered out · 3 muted · 6 tool calls · 41,208 tokens
 react with: doomscroller feedback <id> up|down|save|mute
 ```
 
@@ -32,16 +36,16 @@ react with: doomscroller feedback <id> up|down|save|mute
 
 ```
 sources ──▶ mute ──▶ triage ──▶ score ──▶ noise floor ──▶ cluster ──▶ synthesise ──▶ deliver
-(Composio)   (free)   (Claude)  (profile)   (config)      (dedup)      (Claude)      (Composio)
+(Composio)   (free)    (LLM)    (profile)   (config)      (dedup)        (LLM)       (Composio)
                           │                     ▲
                           └── cached in SQLite  └── learned from your feedback
 ```
 
-**Triage** runs once per item: Claude classifies it (news / analysis / opinion /
-promotion / drama / meme), scores how much of it is engagement machinery versus
-information, extracts the standalone factual claims, and compresses it to one
-line. Verdicts are cached by item id, so a post that shows up in tomorrow's
-window too is never paid for twice.
+**Triage** runs once per item: the model classifies it (news / analysis /
+opinion / promotion / drama / meme), scores how much of it is engagement
+machinery versus information, extracts the standalone factual claims, and
+compresses it to one line. Verdicts are cached in SQLite by item id, so a post
+that shows up in tomorrow's window too is never paid for twice.
 
 **Scoring** combines six components — interest match, substance, a noise
 penalty, freshness, engagement, and learned per-source trust. Every component's
@@ -62,7 +66,7 @@ git clone https://github.com/cyborgcode/doomscroller && cd doomscroller
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 
-cp .env.example .env              # add COMPOSIO_API_KEY and ANTHROPIC_API_KEY
+cp .env.example .env              # add COMPOSIO_API_KEY and NVIDIA_API_KEY
 cp config.example.yaml config.yaml
 
 doomscroller check                # verify credentials and sources
@@ -143,24 +147,64 @@ thin, raise it. `doomscroller brief --dry-run --include-seen` re-ranks
 yesterday's items without refetching, which makes tuning cheap.
 
 Add `mute:` terms for anything you never want to see. Mutes are matched before
-anything reaches Claude, so muted noise costs no tokens.
+anything reaches the model, so muted noise costs no tokens.
 
 ## Cost
 
-Composio's free tier is 20,000 tool calls/month. One brief costs roughly one
-call per configured source, so six sources daily is about 180 calls/month —
-well inside the free tier.
+**Composio** free tier is 20,000 tool calls/month. One brief costs roughly one
+call per configured source, so six sources daily is about 180 calls/month.
 
-Claude spend is dominated by triage, which is per-item. Three things hold it
-down: the triage system prompt is cached across every batch and every run,
-verdicts are cached in SQLite so repeat items cost nothing, and mutes drop items
-before they're sent. Every brief prints its own token usage, including how much
-was served from cache.
+**NVIDIA NIM** serves DeepSeek V4 Flash free on
+[build.nvidia.com](https://build.nvidia.com/deepseek-ai/deepseek-v4-flash) —
+rate-limited rather than metered, so the constraint is requests per minute, not
+spend. `triage_batch_size` is what keeps you under it: 12 items per request
+means ~3 requests for a 40-item day.
 
-To cut it further, lower `models.triage_effort`, reduce source `limit`s, or
-narrow the window. To spend less on the volume pass specifically, point
-`models.triage` at a smaller model and leave `models.synthesis` on Opus — that
-change is yours to make, not one the tool makes for you.
+The one real cost difference against Claude is that **NIM has no prompt
+caching**, so the triage system prompt is re-sent on every batch. Two things
+blunt that: verdicts are cached in SQLite so repeat items cost nothing, and
+mutes drop items before they're sent. Raising `triage_batch_size` amortises the
+system prompt over more items — 12–20 is a reasonable range. Every brief prints
+its own token usage, and `doomscroller check` tells you whether the configured
+provider caches.
+
+## Switching providers
+
+```yaml
+models:
+  provider: anthropic     # was: nvidia_nim
+```
+
+Model ids follow the provider automatically, so you don't need to know both
+spellings. Set them explicitly to override — e.g. `deepseek-ai/deepseek-v4-pro`
+for synthesis while triage stays on Flash.
+
+| | NVIDIA NIM | Anthropic |
+|---|---|---|
+| Default model | `deepseek-ai/deepseek-v4-flash` | `claude-opus-5` |
+| Key | `NVIDIA_API_KEY` | `ANTHROPIC_API_KEY` |
+| Schema enforcement | `nvext.guided_json` (xgrammar) | `output_config.format` |
+| Reasoning depth | `reasoning_effort`: none/high/max | `effort`: low→max |
+| Prompt caching | no | yes |
+
+`triage_effort` and `synthesis_effort` use this project's vocabulary
+(`low`/`medium`/`high`/`xhigh`/`max`) on both; the NIM provider maps them onto
+its three `reasoning_effort` values (`low`→`none`, `medium`/`high`→`high`,
+`xhigh`/`max`→`max`).
+
+### NIM specifics worth knowing
+
+- **`chat_template_kwargs` is mandatory.** DeepSeek V4 on NIM requires
+  `{enable_thinking, thinking}` at the root of the payload; omit it and the
+  request *hangs* rather than erroring, which in a nightly cron looks like the
+  bot silently dying. The provider always sends it, and a test pins that.
+- **Schema output uses `guided_json`, not `response_format`.** NVIDIA recommends
+  it, and unlike `response_format: {"type": "json_object"}` it actually enforces
+  the schema instead of permitting any valid JSON including `{}`.
+- **Reasoning arrives on `reasoning_content`**, not inside the content, so the
+  content parses as clean JSON. Inline `<think>` blocks and markdown fences are
+  stripped anyway, since self-hosted containers vary.
+- **Self-hosting works**: point `models.base_url` at your own container.
 
 ## Running it daily
 
@@ -201,16 +245,18 @@ then register it in `COMPOSIO_SOURCES`.
   by prompt, not by a labelled dataset. Check a few briefs with
   `--dry-run --include-seen` before trusting the filter with things you'd mind
   missing.
-- **No LLM, no filtering.** Without `ANTHROPIC_API_KEY` the pipeline still runs,
-  but items get neutral heuristic verdicts — you get deduplication and
-  recency ranking, not noise removal.
+- **No model, no filtering.** Without a provider key — or if the endpoint is
+  down — the pipeline still runs, but items get neutral heuristic verdicts. You
+  get deduplication and recency ranking, not noise removal. It degrades rather
+  than failing, which also means a quietly broken key looks like a mediocre
+  brief rather than an error; `doomscroller check` is how you catch that.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest                                  # 101 tests, no network or API keys needed
-doomscroller brief --no-llm --dry-run   # exercise the pipeline offline
+pytest                                  # 138 tests, no network or API keys needed
+doomscroller brief --no-llm --dry-run   # exercise the pipeline with no model at all
 ```
 
 ## Licence

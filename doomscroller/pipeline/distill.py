@@ -1,26 +1,28 @@
 """The part that does the actual reading for you.
 
-Two Claude passes:
+Two passes, both through whichever provider is configured (see
+`doomscroller/providers/`):
 
 1. **Triage** — every new item, in batches, gets classified and compressed to a
    single line plus its checkable claims. This is the volume pass, so it runs at
-   low effort with a cached system prompt.
+   low effort, and on providers that support it the system prompt is cached.
 2. **Synthesis** — the survivors get written up as a brief. One call per digest,
-   at high effort, streamed.
+   at high effort.
 
 Triage results are cached in the store keyed by item id, so a post that appears
-in tomorrow's window too is never paid for twice.
+in tomorrow's window too is never paid for twice. That matters more on a
+provider without prompt caching, where the system prompt is re-sent per batch.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Iterable
 
 from ..config import Config
 from ..models import Cluster, Item, ScoredItem, Verdict
+from ..providers import LLMProvider, ProviderUnavailable, build_provider
 
 log = logging.getLogger(__name__)
 
@@ -162,39 +164,28 @@ SYNTHESIS_SCHEMA: dict[str, Any] = {
 }
 
 
-class DistillerUnavailable(RuntimeError):
-    pass
+# Kept as an alias so callers that catch DistillerUnavailable keep working;
+# the providers raise the same condition under its own name.
+DistillerUnavailable = ProviderUnavailable
 
 
 class Distiller:
-    """Wraps the Anthropic client with this project's two prompts."""
+    """This project's two prompts, pointed at whichever provider is configured."""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, provider: LLMProvider | None = None) -> None:
         self.config = config
         self.models = config.models
-        self._client: Any = None
+        self.provider = provider or build_provider(
+            config.models.provider, config.models.provider_options
+        )
         self.input_tokens = 0
         self.output_tokens = 0
         self.cached_tokens = 0
 
-    def _ensure(self) -> Any:
-        if self._client is not None:
-            return self._client
-        try:
-            import anthropic
-        except ImportError as exc:  # pragma: no cover - depends on install
-            raise DistillerUnavailable("the anthropic package is not installed") from exc
-        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-            raise DistillerUnavailable(
-                "ANTHROPIC_API_KEY is not set — the digest needs it to read your feed for you."
-            )
-        self._client = anthropic.Anthropic()
-        return self._client
-
-    def _account(self, usage: Any) -> None:
-        self.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        self.output_tokens += getattr(usage, "output_tokens", 0) or 0
-        self.cached_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+    def _account(self, result: Any) -> None:
+        self.input_tokens += result.input_tokens
+        self.output_tokens += result.output_tokens
+        self.cached_tokens += result.cached_tokens
 
     # -- pass 1: triage --------------------------------------------------
 
@@ -202,7 +193,6 @@ class Distiller:
         """Classify and compress items. Returns verdicts keyed by item id."""
         if not items:
             return {}
-        client = self._ensure()
         verdicts: dict[str, Verdict] = {}
 
         for batch in _batches(items, self.models.triage_batch_size):
@@ -223,42 +213,26 @@ class Distiller:
                 ensure_ascii=False,
             )
 
-            try:
-                response = client.messages.create(
-                    model=self.models.triage,
-                    max_tokens=self.models.max_tokens,
-                    system=[
-                        {
-                            "type": "text",
-                            "text": TRIAGE_SYSTEM,
-                            # Frozen across every batch and every run, so it caches.
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    thinking={"type": "adaptive"},
-                    output_config={
-                        "effort": self.models.triage_effort,
-                        "format": {"type": "json_schema", "schema": TRIAGE_SCHEMA},
-                    },
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": f"Triage these {len(batch)} feed items.\n\n{payload}",
-                        }
-                    ],
+            result = self.provider.complete(
+                model=self.models.triage,
+                system=TRIAGE_SYSTEM,
+                user=f"Triage these {len(batch)} feed items.\n\n{payload}",
+                schema=TRIAGE_SCHEMA,
+                effort=self.models.triage_effort,
+                max_tokens=self.models.max_tokens,
+            )
+            self._account(result)
+
+            if not result.ok:
+                log.warning(
+                    "triage batch of %d degraded to heuristics: %s",
+                    len(batch),
+                    "refused" if result.refused else result.error,
                 )
-            except Exception as exc:  # noqa: BLE001 - a failed batch shouldn't sink the run
-                log.warning("triage batch failed (%d items): %s", len(batch), exc)
                 verdicts.update({item.id: _fallback_verdict(item) for item in batch})
                 continue
 
-            self._account(response.usage)
-            if response.stop_reason == "refusal":
-                log.warning("triage batch refused; falling back to heuristics")
-                verdicts.update({item.id: _fallback_verdict(item) for item in batch})
-                continue
-
-            parsed = _parse_json(response)
+            parsed = _parse_json(result.text)
             for entry in (parsed or {}).get("verdicts", []):
                 item = by_ref.get(str(entry.get("ref", "")))
                 if item is None:
@@ -286,7 +260,6 @@ class Distiller:
         """Write the brief. Returns (overview, {cluster_key: (headline, body)})."""
         if not clusters:
             return "", {}
-        client = self._ensure()
 
         payload = json.dumps(
             [
@@ -304,45 +277,28 @@ class Distiller:
             ensure_ascii=False,
         )
 
-        try:
-            # Streamed: synthesis at high effort can run long enough to trip the
-            # SDK's non-streaming timeout guard.
-            with client.messages.stream(
-                model=self.models.synthesis,
-                max_tokens=self.models.max_tokens,
-                system=[
-                    {
-                        "type": "text",
-                        "text": SYNTHESIS_SYSTEM,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                thinking={"type": "adaptive"},
-                output_config={
-                    "effort": self.models.synthesis_effort,
-                    "format": {"type": "json_schema", "schema": SYNTHESIS_SCHEMA},
-                },
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Write today's brief from these {len(clusters)} story clusters, "
-                            f"covering roughly the last {self.config.window_hours} hours.\n\n{payload}"
-                        ),
-                    }
-                ],
-            ) as stream:
-                response = stream.get_final_message()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("synthesis failed, falling back to per-item summaries: %s", exc)
+        result = self.provider.complete(
+            model=self.models.synthesis,
+            system=SYNTHESIS_SYSTEM,
+            user=(
+                f"Write today's brief from these {len(clusters)} story clusters, "
+                f"covering roughly the last {self.config.window_hours} hours.\n\n{payload}"
+            ),
+            schema=SYNTHESIS_SCHEMA,
+            effort=self.models.synthesis_effort,
+            max_tokens=self.models.max_tokens,
+            stream=True,
+        )
+        self._account(result)
+
+        if not result.ok:
+            log.warning(
+                "synthesis degraded to per-item summaries: %s",
+                "refused" if result.refused else result.error,
+            )
             return "", {}
 
-        self._account(response.usage)
-        if response.stop_reason == "refusal":
-            log.warning("synthesis refused; falling back to per-item summaries")
-            return "", {}
-
-        parsed = _parse_json(response) or {}
+        parsed = _parse_json(result.text) or {}
         entries = {
             str(entry.get("key", "")): (
                 str(entry.get("headline", "")).strip(),
@@ -369,9 +325,8 @@ def _clamp(value: Any, low: float = 0.0, high: float = 1.0) -> float:
         return 0.5
 
 
-def _parse_json(response: Any) -> dict[str, Any] | None:
-    """Pull the JSON body out of a structured-output response."""
-    text = next((block.text for block in response.content if block.type == "text"), "")
+def _parse_json(text: str) -> dict[str, Any] | None:
+    """Parse a structured-output body, tolerating a provider that wrapped it."""
     if not text:
         return None
     try:

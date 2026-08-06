@@ -26,7 +26,31 @@ def test_minimal_config_gets_sensible_defaults(tmp_path):
     assert config.window_hours == 24
     assert config.sources[0].id == "hackernews"
     assert config.delivery[0].kind == "console"  # nothing configured -> console
+    assert config.models.provider == "nvidia_nim"
+    assert config.models.triage == "deepseek-ai/deepseek-v4-flash"
+
+
+def test_switching_provider_switches_the_default_models(tmp_path):
+    """You shouldn't have to know both providers' model-id spellings to switch."""
+    config = load_config(_write(tmp_path, "models:\n  provider: anthropic\nsources: []\n"))
     assert config.models.triage == "claude-opus-5"
+    assert config.models.synthesis == "claude-opus-5"
+
+
+def test_an_explicit_model_overrides_the_provider_default(tmp_path):
+    config = load_config(
+        _write(tmp_path, "models:\n  provider: nvidia_nim\n  triage: deepseek-ai/deepseek-v4-pro\nsources: []\n")
+    )
+    assert config.models.triage == "deepseek-ai/deepseek-v4-pro"
+    assert config.models.synthesis == "deepseek-ai/deepseek-v4-flash"  # untouched default
+
+
+def test_unknown_model_keys_become_provider_options(tmp_path):
+    """So a self-hosted NIM container is a config change, not a code change."""
+    config = load_config(
+        _write(tmp_path, "models:\n  provider: nim\n  base_url: http://localhost:8000/v1\nsources: []\n")
+    )
+    assert config.models.provider_options == {"base_url": "http://localhost:8000/v1"}
 
 
 def test_unknown_source_keys_become_options(tmp_path):

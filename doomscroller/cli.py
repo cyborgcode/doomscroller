@@ -14,6 +14,7 @@ from .config import Config, ConfigError, load_config
 from .delivery import deliver
 from .learn import learn, profile_summary
 from .pipeline import run as run_pipeline
+from .providers import ProviderUnavailable, build_provider
 from .render import RENDERERS
 from .sources import build_source
 from .sources.composio_client import ComposioClient, ComposioUnavailable
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     brief = subparsers.add_parser("brief", help="build and deliver a digest (default)")
     brief.add_argument("--hours", type=int, help="override the config time window")
-    brief.add_argument("--no-llm", action="store_true", help="skip Claude; heuristics only")
+    brief.add_argument("--no-llm", action="store_true", help="skip the model entirely; heuristics only")
     brief.add_argument("--dry-run", action="store_true", help="print to the terminal, deliver nowhere")
     brief.add_argument("--include-seen", action="store_true", help="re-rank items from earlier runs")
     brief.add_argument("--format", choices=sorted(RENDERERS), help="override the dry-run format")
@@ -227,9 +228,26 @@ def cmd_check(args: argparse.Namespace, config: Config) -> int:
 
     print(f"config      user_id={config.user_id} window={config.window_hours}h db={config.db_path}")
 
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    print(f"anthropic   {'ok' if anthropic_key else 'MISSING — digests will fall back to heuristics'}")
-    problems += 0 if anthropic_key else 1
+    provider_keys = {
+        "nvidia_nim": ("NVIDIA_API_KEY", "NIM_API_KEY"),
+        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    }
+    try:
+        provider = build_provider(config.models.provider, config.models.provider_options)
+        wanted = provider_keys.get(provider.name, ())
+        has_key = any(os.environ.get(name) for name in wanted)
+        detail = f"{provider.name} ({config.models.triage})"
+        if has_key:
+            note = "ok"
+            if not provider.supports_prompt_caching:
+                note += " — no prompt caching, so the triage prompt is re-sent per batch"
+        else:
+            note = f"MISSING {wanted[0] if wanted else 'credentials'} — digests fall back to heuristics"
+        print(f"model       {detail}: {note}")
+        problems += 0 if has_key else 1
+    except ProviderUnavailable as exc:
+        print(f"model       {exc}")
+        problems += 1
 
     client = ComposioClient(user_id=config.user_id)
     print(f"composio    {'ok' if client.available else 'MISSING COMPOSIO_API_KEY'}")

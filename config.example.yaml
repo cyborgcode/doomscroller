@@ -98,12 +98,23 @@ delivery:
   #   channel: "#briefs"
 
 models:
-  triage: claude-opus-5     # runs per item — this is where volume lives
-  synthesis: claude-opus-5  # runs once per brief
-  triage_effort: low
+  provider: nvidia_nim        # nvidia_nim | anthropic
+
+  # Leave the model ids unset to use the provider's default
+  # (deepseek-ai/deepseek-v4-flash for NIM, claude-opus-5 for Anthropic).
+  # triage: deepseek-ai/deepseek-v4-flash    # runs per item — where volume lives
+  # synthesis: deepseek-ai/deepseek-v4-pro   # runs once per brief; pro is stronger
+
+  triage_effort: low          # NIM reasoning_effort: low->none, medium/high->high, xhigh/max->max
   synthesis_effort: high
-  triage_batch_size: 12
+  triage_batch_size: 12       # NIM has no prompt caching, so bigger batches amortise
+                              # the system prompt over more items. 12-20 is sensible.
   max_tokens: 16000
+
+  # Any other key here is passed to the provider constructor:
+  # base_url: http://localhost:8000/v1   # a self-hosted NIM container
+  # thinking: false                      # disable DeepSeek's reasoning mode
+  # timeout: 300
 
 ranking:
   noise_ceiling: 0.72       # above this an item never reaches you

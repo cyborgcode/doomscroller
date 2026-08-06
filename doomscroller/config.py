@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .providers import default_model_for
+
 DEFAULT_CONFIG_PATHS = (
     Path("config.yaml"),
     Path.home() / ".config" / "doomscroller" / "config.yaml",
@@ -40,16 +42,22 @@ class DeliveryConfig:
 
 @dataclass
 class ModelConfig:
-    triage: str = "claude-opus-5"
-    """Runs once per item. The expensive knob — this is where volume lives."""
+    provider: str = "nvidia_nim"
+    """Which backend reads your feed: `nvidia_nim` or `anthropic`."""
 
-    synthesis: str = "claude-opus-5"
+    triage: str = ""
+    """Runs once per item. The expensive knob — this is where volume lives.
+    Empty means the provider's default model."""
+
+    synthesis: str = ""
     """Runs once per digest, over the survivors."""
 
     triage_effort: str = "low"
     synthesis_effort: str = "high"
     triage_batch_size: int = 12
     max_tokens: int = 16000
+    provider_options: dict[str, Any] = field(default_factory=dict)
+    """Passed to the provider constructor — `base_url`, `thinking`, `timeout`."""
 
 
 @dataclass
@@ -154,13 +162,28 @@ def _parse(raw: dict[str, Any], origin: Path) -> Config:
         config.delivery = [DeliveryConfig(kind="console")]
 
     models = raw.get("models") or {}
+    provider = str(models.get("provider", ModelConfig.provider))
+    # An unset model means "whatever this provider's default is", so switching
+    # providers doesn't require also knowing both model-id spellings.
+    fallback_model = default_model_for(provider)
+    known_model_keys = {
+        "provider",
+        "triage",
+        "synthesis",
+        "triage_effort",
+        "synthesis_effort",
+        "triage_batch_size",
+        "max_tokens",
+    }
     config.models = ModelConfig(
-        triage=models.get("triage", ModelConfig.triage),
-        synthesis=models.get("synthesis", ModelConfig.synthesis),
+        provider=provider,
+        triage=str(models.get("triage") or fallback_model),
+        synthesis=str(models.get("synthesis") or fallback_model),
         triage_effort=models.get("triage_effort", ModelConfig.triage_effort),
         synthesis_effort=models.get("synthesis_effort", ModelConfig.synthesis_effort),
         triage_batch_size=int(models.get("triage_batch_size", ModelConfig.triage_batch_size)),
         max_tokens=int(models.get("max_tokens", ModelConfig.max_tokens)),
+        provider_options={k: v for k, v in models.items() if k not in known_model_keys},
     )
 
     ranking = raw.get("ranking") or {}
