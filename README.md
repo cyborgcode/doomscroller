@@ -12,6 +12,10 @@ which is free. Feeds are reached through [Composio](https://composio.dev), whose
 free tier is 20,000 tool calls a month — about a hundred times what daily use
 needs. Claude is supported as an alternative backend, one line of config.
 
+It runs happily from your laptop, or **deploys to Vercel** and arrives in
+**Telegram** every morning — buttons and all, so you can keep teaching it from
+your phone.
+
 ```
 Your brief — Thu 06 Aug, 09:12 (last 24h)
 
@@ -187,6 +191,7 @@ something was good but the brief is gone, `history` gets the id back.
 | `auth <toolkit>` | Start a Composio OAuth flow; prints a URL to open. |
 | `tools <toolkit>` | List the real Composio tool slugs available to your account. |
 | `learn` | Fold pending feedback into the profile now, instead of at the next brief. |
+| `telegram <action>` | `check`, `test`, `setup --url …`, `unhook`. See below. |
 
 `brief` flags:
 
@@ -337,14 +342,118 @@ the brief.
 
 ---
 
-## Running it daily
+## Telegram
+
+Telegram is the best way to actually live with this: the brief arrives where you
+already are, and every headline carries 👍 👎 🔇 buttons. Tapping one records the
+same signal `doomscroller feedback` would — which matters once it's running on a
+schedule somewhere you have no shell.
+
+Nothing is truncated. Telegram caps a message at 4096 characters, so the brief is
+split across as many messages as it takes.
+
+```bash
+# 1. Message @BotFather, send /newbot, copy the token into .env
+# 2. Message your new bot once, then:
+#      https://api.telegram.org/bot<TOKEN>/getUpdates
+#    copy result[0].message.chat.id into TELEGRAM_CHAT_ID
+doomscroller telegram check      # confirms both, names your bot
+doomscroller telegram test       # sends a message so you know it works
+```
+
+Then in `config.yaml`:
+
+```yaml
+delivery:
+  - kind: telegram
+```
+
+Buttons only work once the webhook is registered, which needs a public URL —
+see the next section. Until then the brief still arrives; the buttons just
+won't do anything.
+
+By default this uses the Telegram Bot API directly rather than Composio: one
+token instead of an OAuth grant, no Composio quota, and it's the only path that
+can split messages and attach buttons. `via: composio` uses the toolkit instead,
+at the cost of one truncated message and no buttons.
+
+## Deploying to Vercel
+
+Fair warning first: this is a nightly batch job, not a web app, so it sits a
+little sideways on Vercel. What that means in practice:
+
+- **Hobby cron runs once a day, UTC only, and fires anywhere within the hour.**
+  Fine for a morning brief; not fine if you wanted it hourly. Pro lifts this.
+- **Functions have a duration cap.** `vercel.json` asks for 300s, which is
+  comfortable for ~40 items. Very large source lists may need `triage_batch_size`
+  raised, fewer sources, or Pro.
+- **There is no persistent disk.** This is the one that actually bites: a local
+  SQLite file would be wiped between invocations, taking every "already seen"
+  record and all your learned feedback with it. So the database lives in
+  [Turso](https://turso.tech) — same SQLite, reached over HTTP, free tier is 5GB.
+  The functions refuse to start against a local path rather than silently
+  forgetting everything.
+
+If you'd rather not bother, a GitHub Actions cron does the same job with a
+longer time limit and the same Turso setup.
+
+### Steps
+
+```bash
+# 1. Database
+turso db create doomscroller
+turso db show doomscroller --url        # -> TURSO_DATABASE_URL
+turso db tokens create doomscroller     # -> TURSO_AUTH_TOKEN
+
+# 2. Deploy
+npm i -g vercel
+vercel                                  # link the project
+vercel --prod                           # cron only runs on production
+
+# 3. Environment variables (Vercel dashboard, or `vercel env add`)
+#    NVIDIA_API_KEY, COMPOSIO_API_KEY,
+#    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_WEBHOOK_SECRET,
+#    TURSO_DATABASE_URL, TURSO_AUTH_TOKEN, CRON_SECRET
+vercel --prod                           # redeploy so they take effect
+
+# 4. Point Telegram's buttons at the deployment
+doomscroller telegram setup --url https://<your-project>.vercel.app
+
+# 5. Try it without waiting until tomorrow
+vercel crons run /api/cron
+```
+
+`config.yaml` is read from the deployment, so commit it (it holds no secrets —
+those are all environment variables) or point `DOOMSCROLLER_CONFIG` elsewhere.
+
+### What gets deployed
+
+| Path | Role |
+|---|---|
+| `api/cron.py` | Builds and sends the brief. Fired by Vercel Cron; returns run stats as JSON. |
+| `api/telegram.py` | Receives button taps and records feedback. |
+| `vercel.json` | The schedule (`0 7 * * *` UTC) and function limits. |
+
+Both endpoints are protected. The cron checks `Authorization: Bearer $CRON_SECRET`,
+because otherwise anyone who finds the URL can trigger runs and spend your API
+quota. The webhook checks Telegram's `X-Telegram-Bot-Api-Secret-Token`, because
+otherwise it's a public write into your interest profile. Both are open if the
+secret is unset, so a first deploy works — set them.
+
+Change the schedule in `vercel.json` and redeploy. It's UTC, so `0 7 * * *` is
+8am in London during winter and 7am during summer.
+
+## Running it daily on your own machine
+
+If you'd rather not deploy anything:
 
 ```cron
 0 8 * * * cd ~/doomscroller && .venv/bin/doomscroller brief >> ~/.doomscroller.log 2>&1
 ```
 
 Configure a `delivery:` target other than `console` first, or the output goes
-nowhere you'll see it.
+nowhere you'll see it. Telegram works here too — you just won't have the buttons
+without a public webhook, so use the CLI for feedback.
 
 ---
 
@@ -431,13 +540,15 @@ its token usage, and `doomscroller check` tells you whether your provider caches
 
 Worth knowing, since this reads your inbox and your timeline.
 
-- **Locally**, `doomscroller.db` stores item titles, bodies, urls, your feedback,
-  and the learned profile. It's gitignored. Items older than 45 days can be
-  pruned; nothing is uploaded anywhere by this tool.
+- **The database** stores item titles, bodies, urls, your feedback, and the
+  learned profile. Locally that's a gitignored `doomscroller.db`; deployed, it's
+  your Turso database. Items older than 45 days can be pruned.
 - **To Composio** go your OAuth grants and the API calls that fetch your feeds.
 - **To NVIDIA (or Anthropic)** go the title and first 1,500 characters of the
   body of every item that survives muting and isn't already cached — including
   email subjects and snippets if you enable the Gmail source.
+
+- **To Telegram** goes the finished brief — headlines, summaries, and claims.
 
 If some source is more sensitive than you want leaving the machine, don't enable
 it, or narrow its `query` so only the intended mail matches. `mute:` also runs
@@ -466,6 +577,17 @@ than failing, so a broken key looks like a weak brief, not an error.
 
 **Ids don't work.** They're from the brief and expire when the store is pruned.
 `doomscroller history` lists current ones.
+
+**Telegram buttons do nothing.** The webhook isn't registered. Run
+`doomscroller telegram setup --url https://<your-project>.vercel.app`, and check
+`https://api.telegram.org/bot<TOKEN>/getWebhookInfo` for the last error.
+
+**Deployed, but every brief repeats yesterday's items.** The database isn't
+persisting. `/api/cron` returns a `backend` field — it should say `libsql`. If it
+says `sqlite`, `TURSO_DATABASE_URL` didn't reach the deployment.
+
+**The cron never fires.** Cron only runs on production deployments — `vercel --prod`.
+On Hobby it's once a day, UTC, and can fire anywhere within the hour.
 
 ---
 
@@ -512,7 +634,7 @@ then register it in `COMPOSIO_SOURCES`.
 
 ```bash
 pip install -e ".[dev]"
-pytest                                  # 138 tests, no network or API keys needed
+pytest                                  # 214 tests, no network or API keys needed
 doomscroller brief --no-llm --dry-run   # exercise the pipeline with no model at all
 ```
 
@@ -524,7 +646,10 @@ doomscroller brief --no-llm --dry-run   # exercise the pipeline with no model at
 | `pipeline/rank.py` | Scoring and the noise floor |
 | `pipeline/dedup.py` | Clustering |
 | `learn.py` | Feedback → profile |
-| `store.py` | SQLite |
+| `store.py` | Queries, written once against both drivers |
+| `drivers.py` | Local SQLite vs remote libSQL |
+| `telegram.py` | Bot API, message splitting, feedback buttons |
+| `api/` | Vercel functions: cron trigger and webhook |
 
 ## Licence
 

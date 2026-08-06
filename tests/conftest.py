@@ -9,9 +9,29 @@ from doomscroller.models import Item, ScoredItem, Verdict
 from doomscroller.store import Store
 
 
-@pytest.fixture
-def store(tmp_path):
-    with Store(tmp_path / "test.db") as db:
+@pytest.fixture(params=["sqlite", "libsql"])
+def store(request, tmp_path, monkeypatch):
+    """Every store test runs against both drivers.
+
+    The remote path can't reach Turso from here, but the code that would break
+    against it is ours — statement splitting, batching, row conversion — so it
+    runs against a fake client with the real `ClientSync` surface. Deploying to
+    a host with no disk shouldn't be the first time that code executes.
+    """
+    if request.param == "sqlite":
+        with Store(tmp_path / "test.db") as db:
+            yield db
+        return
+
+    import sys
+
+    from tests import fake_libsql
+
+    fake_libsql.create_client_sync.path = str(tmp_path / "remote.db")
+    monkeypatch.setitem(sys.modules, "libsql_client", fake_libsql)
+    monkeypatch.delenv("DOOMSCROLLER_DB_URL", raising=False)
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+    with Store("libsql://fake-db.turso.io", auth_token="test-token") as db:
         yield db
 
 

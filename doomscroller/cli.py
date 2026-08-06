@@ -71,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     history = subparsers.add_parser("history", help="what you were shown recently")
     history.add_argument("--days", type=int, default=3)
 
+    telegram = subparsers.add_parser("telegram", help="set up Telegram delivery")
+    telegram.add_argument(
+        "action", choices=["check", "setup", "test", "unhook"],
+        help="check: verify token+chat. setup: register the webhook. "
+             "test: send a message. unhook: remove the webhook.",
+    )
+    telegram.add_argument("--url", help="deployment base URL, for `setup`")
+
     return parser
 
 
@@ -100,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         "auth": cmd_auth,
         "check": cmd_check,
         "history": cmd_history,
+        "telegram": cmd_telegram,
     }
     return handlers[command](args, config)
 
@@ -302,6 +311,62 @@ def cmd_history(args: argparse.Namespace, config: Config) -> int:
         print(f"  {marker} [{row['item_id']}] {str(row['title'])[:66]}")
     print("\n* = headline. React with: doomscroller feedback <id> up|down|save|mute")
     return 0
+
+
+def cmd_telegram(args: argparse.Namespace, config: Config) -> int:
+    from .telegram import TelegramClient, TelegramError
+
+    client = TelegramClient()
+    if not client.token:
+        print(
+            "TELEGRAM_BOT_TOKEN is not set.\n"
+            "  1. Message @BotFather on Telegram, send /newbot, follow the prompts.\n"
+            "  2. Put the token it gives you in .env as TELEGRAM_BOT_TOKEN.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        if args.action == "check":
+            me = client.get_me()
+            print(f"bot      @{me.get('username')} ({me.get('first_name')})")
+            if not client.chat_id:
+                print(
+                    "chat_id  NOT SET — send your bot any message, then open\n"
+                    f"         https://api.telegram.org/bot{client.token}/getUpdates\n"
+                    "         and copy result[0].message.chat.id into TELEGRAM_CHAT_ID"
+                )
+                return 1
+            print(f"chat_id  {client.chat_id}")
+            return 0
+
+        if args.action == "test":
+            client.send_message("<b>doomscroller</b> is wired up correctly. ✅")
+            print(f"sent a test message to {client.chat_id}")
+            return 0
+
+        if args.action == "unhook":
+            client.delete_webhook()
+            print("webhook removed — button taps will no longer be recorded")
+            return 0
+
+        if not args.url:
+            print("setup needs --url https://<your-project>.vercel.app", file=sys.stderr)
+            return 1
+        endpoint = args.url.rstrip("/") + "/api/telegram"
+        secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+        client.set_webhook(endpoint, secret)
+        print(f"webhook registered: {endpoint}")
+        if not secret:
+            print(
+                "warning: TELEGRAM_WEBHOOK_SECRET is not set, so anyone who finds that "
+                "URL can post feedback into your profile. Set it in both .env and Vercel.",
+                file=sys.stderr,
+            )
+        return 0
+    except TelegramError as exc:
+        print(f"telegram error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,0 +1,7 @@
+# Vercel installs this for the Python functions in api/.
+openai>=1.60
+composio>=0.18
+libsql-client>=0.3
+PyYAML>=6.0
+httpx>=0.27
+python-dateutil>=2.9

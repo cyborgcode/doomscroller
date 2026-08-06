@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    { "path": "/api/cron", "schedule": "0 7 * * *" }
+  ],
+  "functions": {
+    "api/cron.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,briefs/**,.venv/**,**/*.md,**/__pycache__/**}"
+    },
+    "api/telegram.py": {
+      "maxDuration": 30,
+      "excludeFiles": "{tests/**,briefs/**,.venv/**,**/*.md,**/__pycache__/**}"
+    }
+  }
+}

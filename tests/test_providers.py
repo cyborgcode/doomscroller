@@ -244,3 +244,95 @@ def test_default_model_follows_the_provider():
 )
 def test_strip_reasoning(raw, expected):
     assert strip_reasoning(raw) == expected
+
+
+# -- storage drivers -----------------------------------------------------
+
+
+def test_remote_urls_select_the_libsql_driver(tmp_path, monkeypatch):
+    import sys
+
+    from doomscroller.drivers import LibSQLDriver, SQLiteDriver, open_driver
+    from tests import fake_libsql
+
+    fake_libsql.create_client_sync.path = str(tmp_path / "r.db")
+    monkeypatch.setitem(sys.modules, "libsql_client", fake_libsql)
+    monkeypatch.delenv("DOOMSCROLLER_DB_URL", raising=False)
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+
+    assert isinstance(open_driver("libsql://x.turso.io"), LibSQLDriver)
+    assert isinstance(open_driver("https://x.turso.io"), LibSQLDriver)
+    assert isinstance(open_driver(tmp_path / "local.db"), SQLiteDriver)
+
+
+def test_libsql_url_is_normalised_to_https(tmp_path, monkeypatch):
+    """A libsql:// URL selects a websocket transport a short-lived function
+    can't hold open, so it must be rewritten."""
+    import sys
+
+    from doomscroller.drivers import LibSQLDriver
+    from tests import fake_libsql
+
+    fake_libsql.create_client_sync.path = str(tmp_path / "r.db")
+    monkeypatch.setitem(sys.modules, "libsql_client", fake_libsql)
+    LibSQLDriver("libsql://my-db.turso.io", "tok")
+    assert fake_libsql.create_client_sync.last_url == "https://my-db.turso.io"
+    assert fake_libsql.create_client_sync.last_token == "tok"
+
+
+def test_env_db_url_overrides_config(tmp_path, monkeypatch):
+    """On a serverless host the config file is baked into the deployment but
+    the database URL is not, so the environment has to win."""
+    import sys
+
+    from doomscroller.drivers import LibSQLDriver, open_driver
+    from tests import fake_libsql
+
+    fake_libsql.create_client_sync.path = str(tmp_path / "r.db")
+    monkeypatch.setitem(sys.modules, "libsql_client", fake_libsql)
+    monkeypatch.setenv("DOOMSCROLLER_DB_URL", "libsql://from-env.turso.io")
+    assert isinstance(open_driver(tmp_path / "ignored.db"), LibSQLDriver)
+
+
+def test_bulk_writes_are_one_round_trip(tmp_path, monkeypatch):
+    """Each round trip is a network call on a remote database; writing 30 items
+    one request at a time would make a daily brief pathologically slow."""
+    import sys
+
+    from doomscroller.store import Store
+    from tests import fake_libsql
+    from tests.conftest import make_item
+
+    fake_libsql.create_client_sync.path = str(tmp_path / "r.db")
+    monkeypatch.setitem(sys.modules, "libsql_client", fake_libsql)
+    monkeypatch.delenv("DOOMSCROLLER_DB_URL", raising=False)
+    monkeypatch.delenv("TURSO_DATABASE_URL", raising=False)
+
+    store = Store("libsql://x.turso.io")
+    client = store.driver._client
+    before = client.requests
+    store.record_items([make_item(external_id=str(n)) for n in range(30)])
+    assert client.requests - before == 1
+
+
+def test_schema_script_is_split_into_statements():
+    from doomscroller.drivers import split_script
+    from doomscroller.store import SCHEMA
+
+    statements = split_script(SCHEMA)
+    assert len(statements) == 7  # 5 tables + 2 indexes
+    assert all(not s.endswith(";") for s in statements)
+    assert not any(s.strip() == "" for s in statements)
+
+
+def test_pruning_clears_dependents_explicitly(store):
+    """Remote libSQL doesn't honour the foreign-key pragma the local file does,
+    so cascade deletes can't be relied on."""
+    from doomscroller.models import Verdict
+    from tests.conftest import make_item
+
+    item = make_item()
+    store.record_items([item])
+    store.record_verdicts([Verdict(item_id=item.id)])
+    assert store.prune(older_than_days=0) == 1
+    assert store.cached_verdicts([item.id]) == {}

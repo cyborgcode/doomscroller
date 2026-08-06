@@ -14,6 +14,7 @@ from .config import DeliveryConfig
 from .models import Digest
 from .render import to_html, to_markdown, to_terminal
 from .sources.composio_client import ComposioClient
+from .telegram import TelegramClient, TelegramError, send_digest
 
 log = logging.getLogger(__name__)
 
@@ -96,16 +97,38 @@ def _slack(digest: Digest, target: DeliveryConfig, client: ComposioClient) -> st
 
 
 def _telegram(digest: Digest, target: DeliveryConfig, client: ComposioClient) -> str:
-    chat_id = target.options.get("chat_id")
-    if not chat_id:
-        raise DeliveryError("telegram delivery needs a 'chat_id'")
-    result = client.execute(
-        str(target.options.get("slug", "TELEGRAM_SEND_MESSAGE")),
-        {"chat_id": chat_id, "text": _chat_text(digest), "parse_mode": "Markdown"},
+    """Direct Bot API by default; `via: composio` for the toolkit path.
+
+    Direct is the default because it sends the *whole* brief across as many
+    messages as it takes, and can attach the feedback buttons that keep the
+    learning loop reachable when there's no shell to run the CLI in. The
+    Composio path truncates to one message and can't do either.
+    """
+    if str(target.options.get("via", "direct")).lower() == "composio":
+        chat_id = target.options.get("chat_id")
+        if not chat_id:
+            raise DeliveryError("telegram delivery needs a 'chat_id'")
+        result = client.execute(
+            str(target.options.get("slug", "TELEGRAM_SEND_MESSAGE")),
+            {"chat_id": chat_id, "text": _chat_text(digest), "parse_mode": "Markdown"},
+        )
+        if not result.ok:
+            raise DeliveryError(result.error)
+        return f"telegram: sent to {chat_id} (via composio, truncated to one message)"
+
+    telegram = TelegramClient(
+        token=target.options.get("bot_token"),
+        chat_id=target.options.get("chat_id"),
     )
-    if not result.ok:
-        raise DeliveryError(result.error)
-    return f"telegram: sent to {chat_id}"
+    if not telegram.configured:
+        raise DeliveryError(
+            "telegram needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (or bot_token/chat_id in config)"
+        )
+    try:
+        sent = send_digest(digest, telegram, buttons=bool(target.options.get("buttons", True)))
+    except TelegramError as exc:
+        raise DeliveryError(str(exc)) from exc
+    return f"telegram: sent {sent} message(s) to {telegram.chat_id}"
 
 
 def _discord(digest: Digest, target: DeliveryConfig, client: ComposioClient) -> str:

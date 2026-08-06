@@ -80,19 +80,26 @@ sources:
   #   body_keys: [content]
 
 delivery:
+  # Sends the whole brief, split across as many messages as it takes, with
+  # 👍 👎 🔇 buttons under each headline. Tapping one records feedback exactly
+  # as `doomscroller feedback` would — which is what keeps the bot learning
+  # when it runs somewhere you have no shell.
+  - kind: telegram
+    # bot_token / chat_id come from TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
+    # buttons: false     # send it as plain text instead
+    # via: composio      # route through Composio instead of the Bot API
+                         # (one truncated message, no buttons)
+
+  # Comment this out once Telegram works, unless you also want it on screen.
   - kind: console
     color: true
 
-  - kind: file
-    format: markdown        # markdown | html
-    path: briefs/{date}.{ext}
+  # - kind: file
+  #   format: markdown        # markdown | html
+  #   path: briefs/{date}.{ext}
 
   # - kind: gmail
   #   to: you@example.com
-  #   subject: "Your brief — {date}"
-
-  # - kind: telegram
-  #   chat_id: "123456789"
 
   # - kind: slack
   #   channel: "#briefs"
