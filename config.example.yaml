@@ -1,0 +1,120 @@
+# Copy to config.yaml and edit. Secrets live in .env, never here.
+
+user_id: default          # Composio scopes connected accounts to this id
+window_hours: 24          # how far back each brief looks
+db_path: doomscroller.db  # SQLite: seen items, feedback, learned profile
+
+# Seed interests. Used until real feedback exists, then progressively
+# outweighed by what you actually react to.
+interests:
+  - distributed systems
+  - postgres
+  - ai policy
+  - formula 1
+
+# Hard blocks. Matched against item text before anything is sent to Claude,
+# so muted noise costs no tokens. Case-insensitive substrings.
+mute:
+  - crypto pump
+  - "10x engineer"
+
+sources:
+  # --- no auth, no Composio quota ---------------------------------------
+  - id: lobsters
+    platform: rss
+    url: https://lobste.rs/rss
+    limit: 40
+
+  - id: blog:simonwillison
+    platform: rss
+    url: https://simonwillison.net/atom/everything/
+    limit: 20
+
+  # --- Composio-backed --------------------------------------------------
+  # Slugs below are defaults and can drift. Run `doomscroller tools <toolkit>`
+  # to see the slugs your account actually has, then set `slug:` here.
+  - id: hackernews
+    platform: hackernews
+    limit: 50
+    # slug: HACKERNEWS_GET_FRONTPAGE
+
+  - id: reddit:rust
+    platform: reddit
+    subreddit: rust
+    sort: top
+    time_filter: day
+    limit: 30
+
+  - id: reddit:machinelearning
+    platform: reddit
+    subreddit: MachineLearning
+    sort: hot
+    limit: 30
+    weight: 0.9        # firehose — count it slightly less
+
+  - id: x:search
+    platform: twitter
+    enabled: false
+    query: "(postgres OR duckdb) -is:retweet lang:en"
+    limit: 40
+
+  - id: newsletters
+    platform: gmail
+    enabled: false
+    query: "category:updates newer_than:1d"
+    limit: 30
+
+  - id: youtube:talks
+    platform: youtube
+    enabled: false
+    query: "systems programming conference talk"
+    order: date
+    limit: 20
+
+  # Escape hatch for any other Composio toolkit.
+  # - id: notion-weekly
+  #   platform: composio
+  #   slug: NOTION_SEARCH_NOTION_PAGE
+  #   arguments: {query: "weekly review"}
+  #   title_keys: [title, name]
+  #   body_keys: [content]
+
+delivery:
+  - kind: console
+    color: true
+
+  - kind: file
+    format: markdown        # markdown | html
+    path: briefs/{date}.{ext}
+
+  # - kind: gmail
+  #   to: you@example.com
+  #   subject: "Your brief — {date}"
+
+  # - kind: telegram
+  #   chat_id: "123456789"
+
+  # - kind: slack
+  #   channel: "#briefs"
+
+models:
+  triage: claude-opus-5     # runs per item — this is where volume lives
+  synthesis: claude-opus-5  # runs once per brief
+  triage_effort: low
+  synthesis_effort: high
+  triage_batch_size: 12
+  max_tokens: 16000
+
+ranking:
+  noise_ceiling: 0.72       # above this an item never reaches you
+  substance_floor: 0.25     # below this it isn't worth a line
+  headline_count: 8         # fully written-up stories
+  skim_count: 15            # one-liners after them
+  half_life_hours: 14       # freshness decay
+  weights:
+    interest: 1.0           # match against your learned profile
+    substance: 0.8          # how much you'd actually learn
+    noise: 0.9              # penalty for engagement bait
+    freshness: 0.5
+    engagement: 0.25        # popularity is a weak prior, not a verdict
+    source: 0.4             # learned per-source trust

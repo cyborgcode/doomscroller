@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doomscroller"
+version = "0.1.0"
+description = "A personal feed distiller: pulls your social/news feeds through Composio, strips the noise, and hands back a short brief that learns what you actually care about."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "anthropic>=0.69",
+    "composio>=0.18",
+    "PyYAML>=6.0",
+    "httpx>=0.27",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+doomscroller = "doomscroller.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["doomscroller*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
